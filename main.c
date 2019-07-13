@@ -37,6 +37,7 @@ static const char *szret[] = {"I get a correct result\n", "something wrong\n"};
 
 // 从状态机解析出一行内容
 enum LINE_STATUS parse_line(char *buffer, int checked_index, int read_index) {
+    // checked_index, read_index 需要传引用，因为需要改变其值
     char temp;
     for (; checked_index < read_index; ++checked_index) {
         temp = buffer[checked_index];
@@ -108,8 +109,54 @@ enum HTTP_CODE parse_requestLine(char *temp, enum CHECK_STATE checkstate) {
     return NO_REQUEST;
 }
 
+enum HTTP_CODE parse_headers(char *temp) {
+    // 遇到了一个空行，说明是正确的 http 请求
+    if (temp[0] == '\0') {
+        return GET_REQUEST;
+    } else if (strncasecmp(temp, "Host:", 5) == 0) { // 处理 HOST 头
+        temp += 5;
+        temp += strspn(temp, " \t");
+        printf("the request host is %s\n", temp);
+    } else {
+        printf("I can not handle this header \n");
+    }
+
+    return NO_REQUEST;
+}
+
+
 enum HTTP_CODE parse_content(char *buffer, int checked_index, enum CHECK_STATE checkstate,
                              int read_index, int start_line) {
+    // checkstate read_index, start_line 需要返回更改的值
+    enum LINE_STATUS lineStatus = LINE_OK; // 记录当前行的读取状态
+    enum HTTP_CODE retcode = NO_REQUEST;
+    while ((lineStatus == parse_line(buffer, checked_index, read_index)) == LINE_OK) {
+        char *temp = buffer + start_line;
+        start_line = checked_index;
+
+
+        switch (checkstate) {
+            case CHECK_STATE_REQUEST_LINE: {
+                retcode = parse_requestLine(temp, checkstate);
+                if (retcode == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                }
+                break;
+            }
+            case CHECK_STATE_HEADER: {
+                retcode = parse_headers(temp);
+                if (retcode == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                } else if (retcode == GET_REQUEST) {
+                    return GET_REQUEST;
+                }
+                break;
+            }
+            default: {
+                return INTERNAL_ERROR;
+            }
+        }
+    }
 
     return BAD_REQUEST;
 }
@@ -144,7 +191,6 @@ int main(int argc, char *argv[]) {
     socklen_t client_addrlength = sizeof(client_address);
     int fd = accept(listendf, (struct sockaddr *) &client_address, &client_addrlength);
 
-    printf("%d is fd", fd);
     if (fd < 0) {
         printf("error is %d\n", errno);
     } else {
@@ -167,13 +213,16 @@ int main(int argc, char *argv[]) {
 
             read_index += data_read;
 
-            // todo 这里没有写 parse_content 的具体逻辑，所有 curl 会直接返回 something wrong
+            // 分析目前已经获得的所有客户数据
             enum HTTP_CODE result = parse_content(
                     buffer, checked_index, checkState, read_index, start_line);
-            if (result == GET_REQUEST) {
+            printf("content result is %d", result);
+            if (result == NO_REQUEST) { // 如果尚未得到一个完整的 http 请求
+                continue;
+            } else if (result == GET_REQUEST) { // 如果得到了完整的 http 请求
                 send(fd, szret[0], strlen(szret[0]), 0);
                 break;
-            } else {
+            } else {  // 如果发生了错误
                 send(fd, szret[1], strlen(szret[1]), 0);
             }
         }
