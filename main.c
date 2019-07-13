@@ -7,6 +7,7 @@
 #include "errno.h"
 #include "string.h"
 #include "fcntl.h"
+#include "stdio.h"
 
 #define BUFFER_SIZE 4096 // 读缓冲区大小
 
@@ -107,7 +108,15 @@ enum HTTP_CODE parse_requestLine(char *temp, enum CHECK_STATE checkstate) {
     return NO_REQUEST;
 }
 
+enum HTTP_CODE parse_content(char *buffer, int checked_index, enum CHECK_STATE checkstate,
+                             int read_index, int start_line) {
+
+    return BAD_REQUEST;
+}
+
+// todo 可以直接 ./a.out 127.0.0.1 9503 运行
 int main(int argc, char *argv[]) {
+
     if (argc <= 2) {
         printf("usage : %s ip_address port_number\n", basename(argv[0]));
         return 1;
@@ -123,20 +132,52 @@ int main(int argc, char *argv[]) {
     address.sin_port = htons(port);
 
     int listendf = socket(PF_INET, SOCK_STREAM, 0);
+
     assert(listendf > 0);
     int ret = bind(listendf, (struct sockaddr *) &address, sizeof(address));
     assert(ret != -1);
 
     ret = listen(listendf, 5);
+    assert(ret != -1);
 
     struct sockaddr_in client_address;
     socklen_t client_addrlength = sizeof(client_address);
     int fd = accept(listendf, (struct sockaddr *) &client_address, &client_addrlength);
 
+    printf("%d is fd", fd);
     if (fd < 0) {
         printf("error is %d\n", errno);
     } else {
+        char buffer[BUFFER_SIZE]; // 读缓冲区
+        memset(buffer, '\0', BUFFER_SIZE);
+        int data_read = 0;
+        int read_index = 0;
+        int checked_index = 0;
+        int start_line = 0;
+        enum CHECK_STATE checkState = CHECK_STATE_REQUEST_LINE;
+        while (1) {
+            data_read = recv(fd, buffer + read_index, BUFFER_SIZE - read_index, 0);
+            if (data_read == -1) {
+                printf("reading failed \n");
+                break;
+            } else if (data_read == 0) {
+                printf(" remote client has closed the connection \n");
+                break;
+            }
 
+            read_index += data_read;
+
+            // todo 这里没有写 parse_content 的具体逻辑，所有 curl 会直接返回 something wrong
+            enum HTTP_CODE result = parse_content(
+                    buffer, checked_index, checkState, read_index, start_line);
+            if (result == GET_REQUEST) {
+                send(fd, szret[0], strlen(szret[0]), 0);
+                break;
+            } else {
+                send(fd, szret[1], strlen(szret[1]), 0);
+            }
+        }
+        close(fd);
     }
 
     close(listendf);
