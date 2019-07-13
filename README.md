@@ -1,15 +1,7 @@
 # SWS
 simple web server
 - [x] a simple CGI demo
-- [ ] a simple http server
-  - [ ] main
-  - [ ] doit
-  - [ ] clienterror
-  - [ ] read_requesthdrs
-  - [ ] parse_uri
-  - [ ] serve_static
-  - [ ] server_dynamic
-- [ ] 模拟 proactor
+- [x] HTTP 请求的读取和分析
 - [ ]  非阻塞 connect
 - [ ]  i/o 复用聊天室
   - [ ] client
