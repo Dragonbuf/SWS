@@ -34,6 +34,7 @@ enum HTTP_CODE {
 
 static const char *szret[] = {"I get a correct result\n", "something wrong\n"};
 
+// 从状态机解析出一行内容
 enum LINE_STATUS parse_line(char *buffer, int checked_index, int read_index) {
     char temp;
     for (; checked_index < read_index; ++checked_index) {
@@ -64,7 +65,7 @@ enum LINE_STATUS parse_line(char *buffer, int checked_index, int read_index) {
     return LINE_OPEN;
 }
 
-
+// 分析请求行
 enum HTTP_CODE parse_requestLine(char *temp, enum CHECK_STATE checkstate) {
     char *url = strpbrk(temp, " \t");
     if (!url) {
@@ -79,8 +80,31 @@ enum HTTP_CODE parse_requestLine(char *temp, enum CHECK_STATE checkstate) {
         return BAD_REQUEST;
     }
 
-    return NO_REQUEST;
+    url += strspn(url, " \t");
+    char *version = (char *) strspn(url, " \t");
+    if (!version) {
+        return BAD_REQUEST;
+    }
 
+    *version++ = '\0';
+    version += strspn(version, " \t");
+    if (strcasecmp(version, "HTTP/1.1") != 0) {
+        return BAD_REQUEST;
+    }
+
+    if (strncasecmp(url, "http://", 7) == 0) {
+        url += 7;
+        url = strchr(url, '/');
+    }
+
+    if (!url || url[0] != '/') {
+        return BAD_REQUEST;
+    }
+
+    printf("The request URL is %s\n", url);
+
+    checkstate = CHECK_STATE_HEADER;
+    return NO_REQUEST;
 }
 
 int main(int argc, char *argv[]) {
