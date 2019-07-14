@@ -1,3 +1,6 @@
+#define _GNU_SOURCE 1
+
+#include <poll.h>
 #include "sys/socket.h"
 #include "netinet/in.h"
 #include "arpa/inet.h"
@@ -9,227 +12,116 @@
 #include "fcntl.h"
 #include "stdio.h"
 
-#define BUFFER_SIZE 4096 // 读缓冲区大小
+#define USER_LIMIT 5
+#define BUFFER_SIZE 64 // 读缓冲区大小
+#define FD_LIMIT 65535
 
-// 主机状态： 正在分析请求行，正在分析头部字段
-enum CHECK_STATE {
-    CHECK_STATE_REQUEST_LINE = 0,
-    CHECK_STATE_HEADER
+struct client_data {
+    struct sockaddr_in address; // 客户端 socket
+    char *write_buf; // 待写到客户端数据的位置
+    char buf[BUFFER_SIZE]; // 从客户端读入的数据
 };
 
-// 行的读取状态： 读取到一个完整的行，行出错， 行数据尚且不完整
-enum LINE_STATUS {
-    LINE_OK = 0,
-    LINE_BAD,
-    LINE_OPEN
-};
-
-enum HTTP_CODE {
-    NO_REQUEST, // 请求不完整
-    GET_REQUEST, // 获得了一个完整的客户端请求
-    BAD_REQUEST, // 客户端语法有错误
-    FORBIDDEN_REQUEST,
-    INTERNAL_ERROR,
-    CLOSED_CONNECTION // 客户端已经关闭连接
-};
-
-static const char *szret[] = {"I get a correct result\n", "something wrong\n"};
-
-// 从状态机解析出一行内容
-enum LINE_STATUS parse_line(char *buffer, int checked_index, int read_index) {
-    // checked_index, read_index 需要传引用，因为需要改变其值
-    char temp;
-    for (; checked_index < read_index; ++checked_index) {
-        temp = buffer[checked_index];
-
-        if (temp == '\r') {
-            if ((checked_index + 1) == read_index) {
-                return LINE_OPEN;
-            } else if (buffer[checked_index + 1] == '\n') {
-                buffer[checked_index++] = '\0';
-                buffer[checked_index++] = '\0';
-                return LINE_OK;
-            }
-
-            return LINE_BAD;
-        } else if (temp == '\n') {
-            if (checked_index > 1 && buffer[checked_index - 1] == '\r') {
-                buffer[checked_index - 1] = '\0';
-                buffer[checked_index++] = '\0';
-                return LINE_OK;
-            }
-
-            return LINE_BAD;
-        }
-
-    }
-
-    return LINE_OPEN;
+int setnonblocking(int fd) {
+    int old_option = fcntl(fd, F_GETFL);
+    int new_option = old_option | O_NONBLOCK;
+    fcntl(fd, F_SETFL, new_option);
+    return old_option;
 }
 
-// 分析请求行
-enum HTTP_CODE parse_requestLine(char *temp, enum CHECK_STATE checkstate) {
-    char *url = strpbrk(temp, " \t");
-    if (!url) {
-        return BAD_REQUEST;
-    }
-    *url++ = '\0';
-
-    char *method = temp;
-    if (strcasecmp(method, "GET") == 0) {
-        printf("The request method id GET\n");
-    } else {
-        return BAD_REQUEST;
-    }
-
-    url += strspn(url, " \t");
-    char *version = (char *) strspn(url, " \t");
-    if (!version) {
-        return BAD_REQUEST;
-    }
-
-    *version++ = '\0';
-    version += strspn(version, " \t");
-    if (strcasecmp(version, "HTTP/1.1") != 0) {
-        return BAD_REQUEST;
-    }
-
-    if (strncasecmp(url, "http://", 7) == 0) {
-        url += 7;
-        url = strchr(url, '/');
-    }
-
-    if (!url || url[0] != '/') {
-        return BAD_REQUEST;
-    }
-
-    printf("The request URL is %s\n", url);
-
-    checkstate = CHECK_STATE_HEADER;
-    return NO_REQUEST;
-}
-
-enum HTTP_CODE parse_headers(char *temp) {
-    // 遇到了一个空行，说明是正确的 http 请求
-    if (temp[0] == '\0') {
-        return GET_REQUEST;
-    } else if (strncasecmp(temp, "Host:", 5) == 0) { // 处理 HOST 头
-        temp += 5;
-        temp += strspn(temp, " \t");
-        printf("the request host is %s\n", temp);
-    } else {
-        printf("I can not handle this header \n");
-    }
-
-    return NO_REQUEST;
-}
-
-
-enum HTTP_CODE parse_content(char *buffer, int checked_index, enum CHECK_STATE checkstate,
-                             int read_index, int start_line) {
-    // checkstate read_index, start_line 需要返回更改的值
-    enum LINE_STATUS lineStatus = LINE_OK; // 记录当前行的读取状态
-    enum HTTP_CODE retcode = NO_REQUEST;
-    while ((lineStatus == parse_line(buffer, checked_index, read_index)) == LINE_OK) {
-        char *temp = buffer + start_line;
-        start_line = checked_index;
-
-
-        switch (checkstate) {
-            case CHECK_STATE_REQUEST_LINE: {
-                retcode = parse_requestLine(temp, checkstate);
-                if (retcode == BAD_REQUEST) {
-                    return BAD_REQUEST;
-                }
-                break;
-            }
-            case CHECK_STATE_HEADER: {
-                retcode = parse_headers(temp);
-                if (retcode == BAD_REQUEST) {
-                    return BAD_REQUEST;
-                } else if (retcode == GET_REQUEST) {
-                    return GET_REQUEST;
-                }
-                break;
-            }
-            default: {
-                return INTERNAL_ERROR;
-            }
-        }
-    }
-
-    return BAD_REQUEST;
-}
-
-// todo 可以直接 ./a.out 127.0.0.1 9503 运行
+// 可以直接 ./a.out 127.0.0.1 9503 运行
+// 客户端程序使用 poll 同时监听用户输入和网络连接
 int main(int argc, char *argv[]) {
+    const char *ip = "127.0.0.1";
+    int port = atoi("9503");
 
-    if (argc <= 2) {
-        printf("usage : %s ip_address port_number\n", basename(argv[0]));
-        return 1;
-    }
-
-    const char *ip = argv[1];
-    int port = atoi(argv[2]);
-
+    int ret = 0;
     struct sockaddr_in address;
     bzero(&address, sizeof(address));
+
     address.sin_family = AF_INET;
     inet_pton(AF_INET, ip, &address.sin_addr);
     address.sin_port = htons(port);
 
-    int listendf = socket(PF_INET, SOCK_STREAM, 0);
+    int listendfd = socket(PF_INET, SOCK_STREAM, 0);
+    assert(listendfd >= 0);
 
-    assert(listendf > 0);
-    int ret = bind(listendf, (struct sockaddr *) &address, sizeof(address));
+    ret = bind(listendfd, (struct sockaddr *) &address, sizeof(address));
     assert(ret != -1);
 
-    ret = listen(listendf, 5);
+    ret = listen(listendfd, 5);
     assert(ret != -1);
 
-    struct sockaddr_in client_address;
-    socklen_t client_addrlength = sizeof(client_address);
-    int fd = accept(listendf, (struct sockaddr *) &client_address, &client_addrlength);
+    // 分配 client_data 对象
 
-    if (fd < 0) {
-        printf("error is %d\n", errno);
-    } else {
-        char buffer[BUFFER_SIZE]; // 读缓冲区
-        memset(buffer, '\0', BUFFER_SIZE);
-        int data_read = 0;
-        int read_index = 0;
-        int checked_index = 0;
-        int start_line = 0;
-        enum CHECK_STATE checkState = CHECK_STATE_REQUEST_LINE;
-        while (1) {
-            data_read = recv(fd, buffer + read_index, BUFFER_SIZE - read_index, 0);
-            if (data_read == -1) {
-                printf("reading failed \n");
-                break;
-            } else if (data_read == 0) {
-                printf(" remote client has closed the connection \n");
-                break;
-            }
+    struct client_data *users = malloc(sizeof(struct client_data[FD_LIMIT]));
 
-            read_index += data_read;
+    // 为提高 poll 性能， 限制用户数量
+    struct pollfd fds[USER_LIMIT + 1];
+    int user_counter = 0;
+    for (int i = 1; i <= USER_LIMIT; ++i) {
+        fds[i].fd = -1;
+        fds[i].events = 0;
+    }
+    fds[0].fd = listendfd;
+    fds[0].events = POLLIN | POLLERR;
+    fds[0].revents = 0;
 
-            // 分析目前已经获得的所有客户数据
-            enum HTTP_CODE result = parse_content(
-                    buffer, checked_index, checkState, read_index, start_line);
-            printf("content result is %d", result);
-            if (result == NO_REQUEST) { // 如果尚未得到一个完整的 http 请求
+    while (1) {
+        ret = poll(fds, user_counter + 1, -1);
+        if (ret < 0) {
+            printf("poll failure \n");
+            break;
+        }
+
+        for (int i = 0; i < user_counter + 1; ++i) {
+            if ((fds[i].fd == listendfd) && (fds[i].revents & POLLIN)) {
+                struct sockaddr_in client_address;
+                socklen_t client_addrlength = sizeof(client_address);
+                int connfd = accept(listendfd, (struct sockaddr *) &client_address, &client_addrlength);
+                if (connfd < 0) {
+                    printf("errno is :%d \n", errno);
+                    continue;
+                }
+
+                // 请求太多，关闭新到的连接
+                if (user_counter >= USER_LIMIT) {
+                    const char *info = "too many users\n";
+                    printf("%s", info);
+                    send(connfd, info, strlen(info), 0);
+                    close(connfd);
+                    continue;
+                }
+
+                // 对于新连接，同时修改 fds users
+                user_counter++;
+                users[connfd].address = client_address;
+                setnonblocking(connfd);
+                fds[user_counter].fd = connfd;
+                fds[user_counter].events = POLLIN | POLLRDHUP | POLLERR;
+                fds[user_counter].revents = 0;
+                printf("comes a new user ,now have %d users\n", user_counter);
+            } else if (fds[i].revents & POLLERR) {
+                printf("get an error from %d\n", fds[i].fd);
+                char errors[100];
+                memset(errors, '\0', 100);
+                socklen_t length = sizeof(errors);
+                if (getsockopt(fds[i].fd, SOL_SOCKET, SO_ERROR, &errors, &length) < 0) {
+                    printf("get socket option failed\n");
+                }
                 continue;
-            } else if (result == GET_REQUEST) { // 如果得到了完整的 http 请求
-                send(fd, szret[0], strlen(szret[0]), 0);
-                break;
-            } else {  // 如果发生了错误
-                send(fd, szret[1], strlen(szret[1]), 0);
+            } else if (fds[i].revents & POLLRDHUP) {
+                users[fds[i].fd] = users[fds[user_counter].fd];
+                close(fds[i].fd);
+                fds[i] = fds[user_counter];
+                i--;
+                user_counter--;
+                printf(" a client left\n");
             }
         }
-        close(fd);
+
     }
 
-    close(listendf);
-    return 0;
 
+    return 0;
 }
